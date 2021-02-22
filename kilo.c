@@ -58,7 +58,7 @@ struct editorConfig {
 	// Количество строк
 	int numRows;
 	// Строка текста
-	editorRow row;
+	editorRow *row;
 	// Структура, хранящая настройки терминала
 	struct termios originalTermios;
 };
@@ -351,6 +351,30 @@ int getWindowSize(int *rows, int *cols) {
 	}
 }
 
+/*** row operations ***/
+// Выделяет память под новую строку, затем копирует переданную строку в структуру `editorRow` и добавляет в конец
+// массива `config.row` в состоянии (там хранятся все строки, которые нужно вывести).
+void editorAppendRow(char *s, size_t length) {
+	// выделяем место под еще одну строку
+	config.row = realloc(config.row, sizeof(editorRow) * (config.numRows + 1));
+
+	// индекс добавляемой строки (равен количеству строк до добавления, т.к. индексация начинается с нуля)
+	int at = config.numRows;
+
+	// устанавливаем длину строки в состоянии
+	config.row[at].size = length;
+	// выделяем память и сохраняем ссылку в состоянии
+	config.row[at].chars = malloc(length + 1);
+
+	// копируем строку с состояние
+	memcpy(config.row[at].chars, s, length);
+
+	// добавляем символ конца строки
+	config.row[at].chars[length] = '\0';
+	// увеличиваем число строк
+	config.numRows++;
+}
+
 /*** file i/o ***/
 // Открывает и читает файлы с диска.
 void editorOpen(char *filename) {
@@ -365,33 +389,21 @@ void editorOpen(char *filename) {
 	size_t lineCapacity = 0;
 	ssize_t lineLength;
 
-	// Считываем строку. `getline` вернет количество прочитанных символов. Эта функция полезна, когда надо прочитать
-	// строку из файла и заранее не известна ее длина. Управление памятью функция берет на себя.
+	// Считываем строки одну за одной. `getline` возвращает количество прочитанных символов. Эта функция полезна, когда
+	// надо прочитать строку из файла и заранее не известна ее длина. Управление памятью функция берет на себя.
 	// Сначала мы передаем в нее "нулевые" `line` и `lineCapacity`. Это заставляет ее выделить новый участок памяти для
 	// строки, которую она прочитает. `line` будет указывать на выделенную память, а `lineCapacity` - количество
 	// выделенной памяти. Функция вернет -1 если достигнет конца файла. При последующей передаче `line` и `lineCapactiy`
 	// в `getline`, функция будет пытаться использовать память, на которую указывает `line` до тех пор, пока длина
 	// строки не превысит `lineCapacity`.
-	lineLength = getline(&line, &lineCapacity, fp);
-
-	if (lineLength != -1) {
+	while ((lineLength = getline(&line, &lineCapacity, fp)) != -1) {
 		// обрезаем `\n` и `\r` в конце строки
 		while (lineLength > 0 && (line[lineLength - 1] == '\n' || line[lineLength - 1] == '\r')) {
 			lineLength--;
 		}
 
-		// устанавливаем длину строки в состоянии
-		config.row.size = lineLength;
-		// выделяем память и сохраняем ссылку в состоянии
-		config.row.chars = malloc(lineLength + 1);
-
-		// копируем строку с состояние
-		memcpy(config.row.chars, line, lineLength);
-
-		// добавляем символ конца строки
-		config.row.chars[lineLength] = '\0';
-		// устанавливаем число строк
-		config.numRows = 1;
+		// добавляем строку в массив строк для вывода
+		editorAppendRow(line, lineLength);
 	}
 
 	// освобождаем память
@@ -484,12 +496,12 @@ void editorDrawRows(struct abuf *ab) {
 				abAppend(ab, "~", 1);
 			}
 		} else {
-			int length = config.row.size;
+			int length = config.row[y].size;
 			if (length > config.screencols) {
 				length = config.screencols;
 			}
 
-			abAppend(ab, config.row.chars, length);
+			abAppend(ab, config.row[y].chars, length);
 		}
 
 		// очистка строки до конца вместо очистки всего экрана в `editorRefreshScreen`
@@ -635,6 +647,8 @@ void initEditor() {
 
 	//
 	config.numRows = 0;
+
+	config.row = NULL;
 
 	// чтение размеров окна
 	if (getWindowSize(&config.screenrows, &config.screencols) == -1) {
