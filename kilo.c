@@ -61,6 +61,8 @@ struct editorConfig {
 	editorRow *row;
 	// Смещение строк
 	int rowOffset;
+	// Смещение столбцов
+	int columnOffset;
 	// Структура, хранящая настройки терминала
 	struct termios originalTermios;
 };
@@ -500,13 +502,17 @@ void editorDrawRows(struct abuf *ab) {
 				abAppend(ab, "~", 1);
 			}
 		} else {
-			int length = config.row[fileRow].size;
+			int length = config.row[fileRow].size - config.columnOffset;
+
+			if (length < 0) {
+				length = 0;
+			}
 
 			if (length > config.screencols) {
 				length = config.screencols;
 			}
 
-			abAppend(ab, config.row[fileRow].chars, length);
+			abAppend(ab, &config.row[fileRow].chars[config.columnOffset], length);
 		}
 
 		// очистка строки до конца вместо очистки всего экрана в `editorRefreshScreen`
@@ -529,6 +535,14 @@ void editorScroll() {
 
 	if (config.cy > config.rowOffset + config.screenrows) {
 		config.rowOffset = config.cy - config.screenrows + 1;
+	}
+
+	if (config.cx < config.columnOffset) {
+		config.columnOffset = config.cx;
+	}
+
+	if (config.cx >= config.columnOffset + config.screencols) {
+		config.columnOffset = config.cx - config.screencols + 1;
 	}
 }
 
@@ -575,7 +589,7 @@ void editorRefreshScreen() {
 
 	// передвигаем курсор в нужное положение
 	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (config.cy - config.rowOffset) + 1, config.cx + 1);
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (config.cy - config.rowOffset) + 1, (config.cx - config.columnOffset) + 1);
 	abAppend(&ab, buf, strlen(buf));
 
 	// показываем курсор
@@ -599,9 +613,7 @@ void editorMoveCursor(int key) {
 			}
 			break;
 		case ARROW_RIGHT:
-			if (config.cx != config.screencols - 1) {
-				config.cx++;
-			}
+			config.cx++;
 			break;
 		case ARROW_UP:
 			if (config.cy != 0) {
@@ -670,6 +682,8 @@ void initEditor() {
 	config.row = NULL;
 
 	config.rowOffset = 0;
+
+	config.columnOffset = 0;
 
 	// чтение размеров окна
 	if (getWindowSize(&config.screenrows, &config.screencols) == -1) {
