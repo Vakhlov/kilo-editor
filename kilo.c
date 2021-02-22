@@ -59,6 +59,8 @@ struct editorConfig {
 	int numRows;
 	// Строка текста
 	editorRow *row;
+	// Смещение строк
+	int rowOffset;
 	// Структура, хранящая настройки терминала
 	struct termios originalTermios;
 };
@@ -460,7 +462,9 @@ void editorDrawRows(struct abuf *ab) {
 	int y;
 
 	for (y = 0; y < config.screenrows; y++) {
-		if (y >= config.numRows) {
+		int fileRow = y + config.rowOffset;
+
+		if (fileRow >= config.numRows) {
 			// выводим приветствие в первой трети экрана
 			if (config.numRows == 0 && y == config.screenrows / 3) {
 				// запись приветствия в буфер
@@ -496,12 +500,13 @@ void editorDrawRows(struct abuf *ab) {
 				abAppend(ab, "~", 1);
 			}
 		} else {
-			int length = config.row[y].size;
+			int length = config.row[fileRow].size;
+
 			if (length > config.screencols) {
 				length = config.screencols;
 			}
 
-			abAppend(ab, config.row[y].chars, length);
+			abAppend(ab, config.row[fileRow].chars, length);
 		}
 
 		// очистка строки до конца вместо очистки всего экрана в `editorRefreshScreen`
@@ -516,8 +521,22 @@ void editorDrawRows(struct abuf *ab) {
 	}
 }
 
+//
+void editorScroll() {
+	if (config.cy < config.rowOffset) {
+		config.rowOffset = config.cy;
+	}
+
+	if (config.cy > config.rowOffset + config.screenrows) {
+		config.rowOffset = config.cy - config.screenrows + 1;
+	}
+}
+
 // обновляет экран
 void editorRefreshScreen() {
+	// прокручиваем содержимое, если надо
+	editorScroll();
+
 	// можно выводить интерфейс построчно, но лучше сначала записать весь интерфейс в буфер,
 	// а потом вывести одной командой.
 
@@ -556,7 +575,7 @@ void editorRefreshScreen() {
 
 	// передвигаем курсор в нужное положение
 	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", config.cy + 1, config.cx + 1);
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (config.cy - config.rowOffset) + 1, config.cx + 1);
 	abAppend(&ab, buf, strlen(buf));
 
 	// показываем курсор
@@ -590,7 +609,7 @@ void editorMoveCursor(int key) {
 			}
 			break;
 		case ARROW_DOWN:
-			if (config.cy != config.screenrows - 1) {
+			if (config.cy < config.numRows) {
 				config.cy++;
 			}
 			break;
@@ -649,6 +668,8 @@ void initEditor() {
 	config.numRows = 0;
 
 	config.row = NULL;
+
+	config.rowOffset = 0;
 
 	// чтение размеров окна
 	if (getWindowSize(&config.screenrows, &config.screencols) == -1) {
