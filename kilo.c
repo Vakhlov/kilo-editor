@@ -1,10 +1,15 @@
 /*** includes ***/
+// #define _DEFAULT_SOURCE;
+// #define _BSD_SOURCE;
+// #define _GNU_SOURCE;
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -14,10 +19,10 @@
 // за регистр: установкой и снятием бита осуществляется переключение между нижним и верхним регистром.
 #define CTRL_KEY(k) ((k) & 0x1f)
 
-// константа с версией
+// Константа с версией
 #define KILO_VERSION "0.0.1"
 
-// константы для использования в функциях обработки ввода
+// Константы для использования в функциях обработки ввода
 enum editorKey {
 	ARROW_LEFT = 1000,
 	ARROW_RIGHT,
@@ -31,6 +36,14 @@ enum editorKey {
 };
 
 /*** data ***/
+// Тип для хранения строки текста
+typedef struct editorRow {
+	// Длина строки
+	int size;
+	// Символы в строке
+	char *chars;
+} editorRow;
+
 // Конфигурация редактора, заполняется в процессе инициализации, изменяется в процессе работы. Отражает текущее
 // состояние редактора.
 struct editorConfig {
@@ -42,6 +55,10 @@ struct editorConfig {
 	int screencols;
 	// Количество столбцов в окне терминала (ширина окна терминала)
 	int screenrows;
+	// Количество строк
+	int numRows;
+	// Строка текста
+	editorRow row;
 	// Структура, хранящая настройки терминала
 	struct termios originalTermios;
 };
@@ -67,7 +84,7 @@ void die(const char *s) {
 	exit(1);
 }
 
-// Восстанавливает `canonical`-режим терминала
+// Восстанавливает `canonical`-режим терминала.
 void disableRawMode() {
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &config.originalTermios) == -1) {
 		die("tcsetattr");
@@ -267,7 +284,7 @@ int editorReadKey() {
 	}
 }
 
-// получает положение курсора
+// Получает положение курсора.
 int getCursorPosition(int *rows, int *cols) {
 	char buf[32];
 	unsigned int i = 0;
@@ -311,7 +328,7 @@ int getCursorPosition(int *rows, int *cols) {
 
 // Получает размер терминала в строках и столбцах. `TIOCGWINSZ` - это, вероятно, Terminal Input/Output Control Get
 // WINdow SiZe.
-// `winsize` из `sys.ioctl.h`
+// `winsize` из `sys.ioctl.h`.
 int getWindowSize(int *rows, int *cols) {
 	struct winsize ws;
 
@@ -334,10 +351,60 @@ int getWindowSize(int *rows, int *cols) {
 	}
 }
 
-/*** append buffer ***/
-// в си нет динамических строк, поэтому делаем собственную реализацию с одной операцией - добавлением
+/*** file i/o ***/
+// Открывает и читает файлы с диска.
+void editorOpen(char *filename) {
+	// открываем файл
+	FILE *fp = fopen(filename, "r");
 
-// стуктура данных для накопителя
+	if (!fp) {
+		die("fopen");
+	}
+
+	char *line = NULL;
+	size_t lineCapacity = 0;
+	ssize_t lineLength;
+
+	// Считываем строку. `getline` вернет количество прочитанных символов. Эта функция полезна, когда надо прочитать
+	// строку из файла и заранее не известна ее длина. Управление памятью функция берет на себя.
+	// Сначала мы передаем в нее "нулевые" `line` и `lineCapacity`. Это заставляет ее выделить новый участок памяти для
+	// строки, которую она прочитает. `line` будет указывать на выделенную память, а `lineCapacity` - количество
+	// выделенной памяти. Функция вернет -1 если достигнет конца файла. При последующей передаче `line` и `lineCapactiy`
+	// в `getline`, функция будет пытаться использовать память, на которую указывает `line` до тех пор, пока длина
+	// строки не превысит `lineCapacity`.
+	lineLength = getline(&line, &lineCapacity, fp);
+
+	if (lineLength != -1) {
+		// обрезаем `\n` и `\r` в конце строки
+		while (lineLength > 0 && (line[lineLength - 1] == '\n' || line[lineLength - 1] == '\r')) {
+			lineLength--;
+		}
+
+		// устанавливаем длину строки в состоянии
+		config.row.size = lineLength;
+		// выделяем память и сохраняем ссылку в состоянии
+		config.row.chars = malloc(lineLength + 1);
+
+		// копируем строку с состояние
+		memcpy(config.row.chars, line, lineLength);
+
+		// добавляем символ конца строки
+		config.row.chars[lineLength] = '\0';
+		// устанавливаем число строк
+		config.numRows = 1;
+	}
+
+	// освобождаем память
+	free(line);
+
+	// закрываем файл
+	fclose(fp);
+}
+
+/*** append buffer ***/
+// В си нет динамических строк, поэтому делаем собственную реализацию с одной операцией - добавлением.
+
+// Стуктура данных для накопителя.
 struct abuf {
 	// указатель на начало
 	char *b;
@@ -345,10 +412,10 @@ struct abuf {
 	int len;
 };
 
-// константа представляет пустой буфер. работает как своеобразный конструктор
+// Константа представляет пустой буфер. работает как своеобразный конструктор.
 #define ABUF_INIT {NULL, 0}
 
-// увеличивает занимаемую память и добавляет строку в конец имеющейся в буфере
+// Увеличивает занимаемую память и добавляет строку в конец имеющейся в буфере.
 void abAppend(struct abuf *ab, const char *s, int len) {
 	// получаем блок памяти, который будет вмещать новую строку
 	// `realloc` либо расширяет используемый блок памяти, либо освобождает память от него и предоставляет новый участок
@@ -381,41 +448,48 @@ void editorDrawRows(struct abuf *ab) {
 	int y;
 
 	for (y = 0; y < config.screenrows; y++) {
-		// write(STDOUT_FILENO, "~", 1);
+		if (y >= config.numRows) {
+			// выводим приветствие в первой трети экрана
+			if (config.numRows == 0 && y == config.screenrows / 3) {
+				// запись приветствия в буфер
+				char welcome[80];
+				int welcomeLen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
 
-		// выводим приветствие в первой трети экрана
-		if (y == config.screenrows / 3) {
-			// запись приветствия в буфер
-			char welcome[80];
-			int welcomeLen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
+				// подстраховка для узких окон
+				if (welcomeLen > config.screencols) {
+					welcomeLen = config.screencols;
+				}
 
-			// подстраховка для узких окон
-			if (welcomeLen > config.screencols) {
-				welcomeLen = config.screencols;
-			}
+				// центровка приветствия
+				// считаем отступ слева (он равен отступу справа)
+				int padding = (config.screencols - welcomeLen) / 2;
 
-			// центровка приветствия
-			// считаем отступ слева (он равен отступу справа)
-			int padding = (config.screencols - welcomeLen) / 2;
+				if (padding) {
+					// записываем тильду
+					abAppend(ab, "~", 1);
+					// уменьшаем отступ слева на единицу, т.к. вывели тильду
+					padding--;
+				}
 
-			if (padding) {
-				// записываем тильду
+				// заполняем отступ слева пробелами
+				while (padding--) {
+					abAppend(ab, " ", 1);
+				}
+				// \центровка приветствия
+
+				// вывод приветствия
+				abAppend(ab, welcome, welcomeLen);
+			} else {
+				// во всех остальных случаях просто выводим тильду
 				abAppend(ab, "~", 1);
-				// уменьшаем отступ слева на единицу, т.к. вывели тильду
-				padding--;
 			}
-
-			// заполняем отступ слева пробелами
-			while (padding--) {
-				abAppend(ab, " ", 1);
-			}
-			// \центровка приветствия
-
-			// вывод приветствия
-			abAppend(ab, welcome, welcomeLen);
 		} else {
-			// во всех остальных случаях просто выводим тильду
-			abAppend(ab, "~", 1);
+			int length = config.row.size;
+			if (length > config.screencols) {
+				length = config.screencols;
+			}
+
+			abAppend(ab, config.row.chars, length);
 		}
 
 		// очистка строки до конца вместо очистки всего экрана в `editorRefreshScreen`
@@ -559,6 +633,9 @@ void initEditor() {
 	config.cx = 0;
 	config.cy = 0;
 
+	//
+	config.numRows = 0;
+
 	// чтение размеров окна
 	if (getWindowSize(&config.screenrows, &config.screencols) == -1) {
 		die("getWindowSize");
@@ -566,11 +643,16 @@ void initEditor() {
 }
 
 /*** --- ***/
-int main() {
+int main(int argc, char *argv[]) {
 	// включаем `raw`-режим
 	enableRawMode();
 	// инициализируем редактор
 	initEditor();
+
+	// если в качестве аргумента командной строки передан файл, открываем его
+	if (argc >= 2) {
+		editorOpen(argv[1]);
+	}
 
 	while(1) {
 		// рисуем интерфейс
